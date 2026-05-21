@@ -60,18 +60,18 @@
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
-#define NEIGHBOUR_EXPIRY_SECS        (60 * 60 * 24 * 2) // 2 days
+#define NEIGHBOUR_EXPIRATION_SECS    (60 * 60 * 24 * 2) // 2 days
 
-#define ADVERTS_ALLOWED_START        2  // hours
-#define ADVERTS_ALLOWED_END          6  // hours
-#define ADVERTS_ALLOWED_COUNT        3
+#define ADVERTS_ALLOWED_START        2 // hours >=
+#define ADVERTS_ALLOWED_END          5 // hours <=
+#define ADVERTS_ALLOWED_COUNT        1
 
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
 #if MAX_NEIGHBOURS // check if neighbours enabled
   uint32_t now = getRTCClock()->getCurrentTime();
   for (int i = 0; i < MAX_NEIGHBOURS; i++) {
     // Cleanup old neighbours
-    if (now >= neighbours[i].heard_timestamp && now - neighbours[i].heard_timestamp > NEIGHBOUR_EXPIRY_SECS) {
+    if (now >= neighbours[i].heard_timestamp && now - neighbours[i].heard_timestamp > NEIGHBOUR_EXPIRATION_SECS) {
       memset(&neighbours[i], 0, sizeof(NeighbourInfo));
     }
   }

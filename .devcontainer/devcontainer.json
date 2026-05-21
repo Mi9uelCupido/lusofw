@@ -4,9 +4,7 @@
 	"features": {
 		"ghcr.io/devcontainers/features/node:1": {},
 		"ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
-			"packages": [
-				"sudo"
-			]
+			"packages": [ "sudo", "ripgrep" ]
 		}
 	},
 	"runArgs": [
