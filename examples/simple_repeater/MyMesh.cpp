@@ -574,6 +574,12 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   // https://github.com/meshcore-dev/MeshCore/issues/1223
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT && packet->isRouteFlood()) {
 
+    // Reject adverts from repeaters whose pub_key starts with 0x01 (MOBILE NODE)
+    if (packet->payload_len > 0 && packet->payload[0] == 0x01) {
+      MESH_DEBUG_PRINTLN("Flood advert REJECTED: pub_key starts with 0x01");
+      return false;
+    }
+
     uint32_t now = getRTCClock()->getCurrentTime();
     DateTime dt = DateTime(now);
     uint8_t current_hour = dt.hour();

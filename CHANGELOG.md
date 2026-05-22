@@ -1,13 +1,15 @@
 # Changelog
 
-## [unreleased]
+## [v2026.5.1] - 21/05/2026
 
 Based on MeshCore v1.15.0
 main@ecd0cfc1c133aad93e65257f002151591f6bcfd9
 
 ### Features
 
-- Change version schema to year.month.release (2026.4.1)
+- Change version schema to year.month.release (2026.5.1)
+- Include Lora longer preamble #1954 (helps for 868Mhz in Portugal)
+- Block adverts from mobile repeaters (01)
 
 ## [v0.0.7] - 01/04/2026
 
