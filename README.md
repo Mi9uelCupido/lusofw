@@ -34,4 +34,4 @@ This is not intended to be a hard fork of the upstream repository. Instead, luso
 
 - Official Portuguese website: https://meshcore.pt
 - Online flasher: https://flasher.meshcore.pt
-- Original website: https://meshcore.co.uk
+- Original website: https://meshcore.io/
