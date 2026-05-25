@@ -59,12 +59,12 @@ jobs:
           - Xiao_S3_WIO_repeater_bridge_espnow
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.ref }}
 
       - name: Init Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/pip
@@ -72,7 +72,7 @@ jobs:
           key: ${{ runner.os }}-pio-${{ matrix.firmware }}
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -96,7 +96,7 @@ jobs:
         run: /usr/bin/env bash build.sh build-firmware ${{ matrix.firmware }}
 
       - name: Upload Firmware Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.firmware }}
           path: out
@@ -107,7 +107,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.ref }}
 
@@ -172,6 +172,14 @@ jobs:
             ' CHANGELOG.md > release_body.md
           fi
 
+      - name: Generate SHA1 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          find out -type f ! -name '*.sha1' | while read -r f; do
+            sha1sum "$f" | awk '{print $1}' > "${f}.sha1"
+          done
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -181,3 +189,4 @@ jobs:
           draft: false
           prerelease: ${{ github.event_name == 'workflow_dispatch' }}
           files: out/*
+
