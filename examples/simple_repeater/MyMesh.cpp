@@ -574,12 +574,6 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   // https://github.com/meshcore-dev/MeshCore/issues/1223
   if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT && packet->isRouteFlood()) {
 
-    // Reject adverts from repeaters whose pub_key starts with 0x01 (MOBILE NODE)
-    if (packet->payload_len > 0 && packet->payload[0] == 0x01) {
-      MESH_DEBUG_PRINTLN("Flood advert REJECTED: pub_key starts with 0x01");
-      return false;
-    }
-
     uint32_t now = getRTCClock()->getCurrentTime();
     DateTime dt = DateTime(now);
     uint8_t current_hour = dt.hour();
@@ -594,6 +588,12 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 
     // Extract advert type from app_data (lower 4 bits of first byte).
     uint8_t adv_type = (packet->payload_len > app_data_offset) ? (packet->payload[app_data_offset] & 0x0F) : 0xFF;
+
+    // Reject adverts from repeaters whose pub_key starts with 0x01 (MOBILE NODE)
+    if (packet->payload_len > 0 && adv_type == ADV_TYPE_REPEATER && packet->payload[0] == 0x01) {
+      MESH_DEBUG_PRINTLN("Flood advert REJECTED: pub_key starts with 0x01 for repeater");
+      return false;
+    }
 
     if (packet->payload_len > app_data_offset && adv_type != ADV_TYPE_NONE && adv_type != ADV_TYPE_CHAT) {
       // Use local validated value to avoid modifying preferences in packet-forwarding logic

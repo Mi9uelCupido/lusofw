@@ -1,5 +1,15 @@
 # Changelog
 
+## [v2026.5.2] - 25/05/2026
+
+Based on MeshCore v1.15.0
+main@ecd0cfc1c133aad93e65257f002151591f6bcfd9
+
+### Features
+
+- Add support for the Seeed P1 Pro bridge type
+- Restrict the “01” advert reduction to repeaters only
+
 ## [v2026.5.1] - 22/05/2026
 
 Based on MeshCore v1.15.0
