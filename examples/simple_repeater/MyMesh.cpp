@@ -567,27 +567,38 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
   }
 }
 
+int MyMesh::countActiveNeighbours() {
+#if MAX_NEIGHBOURS
+  int count = 0;
+  uint32_t ts = getRTCClock()->getCurrentTime();
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (neighbours[i].heard_timestamp > 0 && ts >= neighbours[i].heard_timestamp &&
+        ts - neighbours[i].heard_timestamp < NEIGHBOUR_EXPIRATION_SECS) {
+      count++;
+    }
+  }
+  return count;
+#else
+  return 0;
+#endif
+}
+
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (_prefs.disable_fwd) return false;
   if (packet->isRouteFlood()) {
     if (packet->getPathHashCount() >= _prefs.flood_max) return false;
     if (packet->getRouteType() == ROUTE_TYPE_FLOOD && packet->getPathHashCount() >= _prefs.flood_max_unscoped) return false;
-    // Adaptive flood.max.advert: fewer neighbours → allow more hops; dense hub → fewer hops
+    // Adaptive flood.max.advert: fewer neighbours → allow more hops; dense hub → fewer hops.
+    // Neighbour count computed ONCE here and reused by the probabilistic filter below.
     if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
+      _cached_active_nbr = countActiveNeighbours();
       uint8_t eff_max_advert = _prefs.flood_max_advert;
 #if MAX_NEIGHBOURS
-      {
-        int nbr = 0;
-        uint32_t ts = getRTCClock()->getCurrentTime();
-        for (int i = 0; i < MAX_NEIGHBOURS; i++) {
-          if (neighbours[i].heard_timestamp > 0 && ts >= neighbours[i].heard_timestamp &&
-              ts - neighbours[i].heard_timestamp < NEIGHBOUR_EXPIRATION_SECS) nbr++;
-        }
-        if      (nbr <= 2)  eff_max_advert = min(255, (int)eff_max_advert * 2);
-        else if (nbr <= 5)  eff_max_advert = min(255, (int)eff_max_advert * 3 / 2);
-        else if (nbr >= 9 && nbr <= 12) eff_max_advert = max(3, (int)eff_max_advert * 3 / 4);
-        else if (nbr > 12)  eff_max_advert = max(2, (int)eff_max_advert / 2);
-      }
+      int nbr = _cached_active_nbr;
+      if      (nbr <= 2)  eff_max_advert = min(255, (int)eff_max_advert * 2);
+      else if (nbr <= 5)  eff_max_advert = min(255, (int)eff_max_advert * 3 / 2);
+      else if (nbr >= 9 && nbr <= 12) eff_max_advert = max(3, (int)eff_max_advert * 3 / 4);
+      else if (nbr > 12)  eff_max_advert = max(2, (int)eff_max_advert / 2);
 #endif
       if (packet->getPathHashCount() >= eff_max_advert) return false;
     }
@@ -647,20 +658,10 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
       }
 
       // Adapt flood probability to active neighbour density.
-      // A hub with many neighbours should be more selective (reduce congestion).
-      // An edge node with few neighbours should be more aggressive (ensure coverage).
-      // Scale is applied on top of the user-configured base value.
+      // Reuses _cached_active_nbr computed above (no second loop over neighbours).
 #if MAX_NEIGHBOURS
       {
-        int active_count = 0;
-        uint32_t now_ts = getRTCClock()->getCurrentTime();
-        for (int i = 0; i < MAX_NEIGHBOURS; i++) {
-          if (neighbours[i].heard_timestamp > 0 &&
-              now_ts >= neighbours[i].heard_timestamp &&
-              now_ts - neighbours[i].heard_timestamp < NEIGHBOUR_EXPIRATION_SECS) {
-            active_count++;
-          }
-        }
+        int active_count = _cached_active_nbr;
         float scale;
         if      (active_count <= 2)  scale = 1.6f;  // very sparse  → propagate aggressively
         else if (active_count <= 5)  scale = 1.2f;  // sparse       → slightly more aggressive
@@ -1245,6 +1246,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   // cached sensor readings (updated by timers, not every loop)
   _cached_batt_mv    = 0;
   _cached_temperature = NAN;
+  _cached_active_nbr  = 0;
 
   // flood filter stats
   _flood_advert_accepted = 0;
@@ -2269,17 +2271,6 @@ void MyMesh::fillDisplayStatus(RepeaterStatus& s) {
   if (_temp_tx_reduced) eff -= TEMP_TX_REDUCE_DBM;
   s.tx_power_eff = eff;
 
-  // Count active neighbours
-  uint8_t count = 0;
-#if MAX_NEIGHBOURS
-  uint32_t now_ts = getRTCClock()->getCurrentTime();
-  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
-    if (neighbours[i].heard_timestamp > 0 &&
-        now_ts >= neighbours[i].heard_timestamp &&
-        now_ts - neighbours[i].heard_timestamp < NEIGHBOUR_EXPIRATION_SECS) {
-      count++;
-    }
-  }
-#endif
-  s.neighbour_count = count;
+  // Count active neighbours (uses shared helper)
+  s.neighbour_count = (uint8_t)countActiveNeighbours();
 }

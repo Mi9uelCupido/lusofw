@@ -177,6 +177,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint16_t _cached_batt_mv;
   float    _cached_temperature;
 
+  // cached active neighbour count — computed once per advert in allowPacketForward()
+  int      _cached_active_nbr;
+
   // flood advert filter efficiency counters
   uint32_t _flood_advert_accepted;
   uint32_t _flood_advert_rejected;
@@ -220,6 +223,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   void applyTimeConsensus();
   void applyEffectiveTxPower();  // centralised TX power: batt + TPC + temp combined
+  int countActiveNeighbours();   // count neighbours heard within expiration window
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
