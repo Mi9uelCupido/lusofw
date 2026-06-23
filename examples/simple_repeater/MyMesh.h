@@ -204,6 +204,19 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   // persistent reboot counter (loaded from flash in begin())
   uint32_t _reboot_count;
 
+  // memory watchdog: proactive reboot if heap runs low
+  uint8_t  _heap_fail_count;
+  unsigned long _next_heap_check;
+
+  // last received packet timestamp (for display "Last RX: Xm ago")
+  uint32_t _last_rx_pkt_cnt;
+  unsigned long _last_rx_millis;
+
+  // hourly TX duty cycle history (24 slots, one per UTC hour)
+  uint16_t _hourly_dc_ms[24];      // TX air time used per slot (ms, max 65535)
+  uint32_t _airtime_at_hour_start;  // getTotalAirTime() snapshot at start of current hour
+  uint8_t  _dc_last_rtc_hour;      // last RTC hour we updated
+
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   void applyTimeConsensus();
   void applyEffectiveTxPower();  // centralised TX power: batt + TPC + temp combined

@@ -74,6 +74,22 @@ DisplayDriver::Color UITask::tempColor() const {
   return DisplayDriver::RED;
 }
 
+// ─── SNR signal bars (like WiFi indicator) ──────────────────────────────────
+
+static void drawSNRBars(DisplayDriver* d, int x, int y, float snr) {
+  int bars = (snr < 0) ? 0 : (snr < 5) ? 1 : (snr < 10) ? 2 : (snr < 15) ? 3 : 4;
+  for (int i = 0; i < 4; i++) {
+    int h = 2 + i * 2;          // bar heights: 2, 4, 6, 8 pixels
+    int bx = x + i * 4;
+    int by = y + (8 - h);        // align bars to bottom
+    if (i < bars) {
+      d->fillRect(bx, by, 3, h);
+    } else {
+      d->drawRect(bx, by, 3, h);
+    }
+  }
+}
+
 // ─── Bottom bar: time (left) + page dots (centre) ───────────────────────────
 
 void UITask::renderTimeAndDots() {
@@ -167,30 +183,45 @@ void UITask::renderPage1() {
   _display->setCursor(0, 0);
   _display->print(tmp);
 
-  // Neighbours + last SNR
-  snprintf(tmp, sizeof(tmp), "Nbrs:%-3d  SNR:%+.1fdB",
+  // Neighbours + SNR value + signal bars
+  snprintf(tmp, sizeof(tmp), "Nbrs:%-3d SNR:%+.0fdB",
            _status->neighbour_count, _status->last_snr);
   _display->setCursor(0, 12);
   _display->print(tmp);
+  drawSNRBars(_display, 108, 12, _status->last_snr);
 
-  // Uptime + duty cycle
+  // Uptime + last RX
   char upt[20];
   formatUptime(upt, _status->uptime_secs);
-  if (_status->duty_cycle_pct > 0.0f) {
+  {
+    // Format last RX time
+    char lrx[12];
+    uint32_t s = _status->last_rx_secs_ago;
+    if      (s < 60)     snprintf(lrx, sizeof(lrx), "%us", (unsigned)s);
+    else if (s < 3600)   snprintf(lrx, sizeof(lrx), "%um", (unsigned)(s/60));
+    else if (s < 86400)  snprintf(lrx, sizeof(lrx), "%uh", (unsigned)(s/3600));
+    else                 snprintf(lrx, sizeof(lrx), "%ud", (unsigned)(s/86400));
+    snprintf(tmp, sizeof(tmp), "Up:%s LRX:%s", upt, lrx);
+    _display->setColor(DisplayDriver::LIGHT);
+    _display->setCursor(0, 23);
+    _display->print(tmp);
+  }
+
+  // Duty cycle + TX active indicator
+  {
     DisplayDriver::Color dc_color = (_status->duty_cycle_pct < 8.0f)
                                     ? DisplayDriver::GREEN : DisplayDriver::ORANGE;
-    _display->setColor(DisplayDriver::LIGHT);
-    snprintf(tmp, sizeof(tmp), "Up:%s", upt);
-    _display->setCursor(0, 23);
-    _display->print(tmp);
     _display->setColor(dc_color);
-    snprintf(tmp, sizeof(tmp), "DC:%.1f%%", _status->duty_cycle_pct);
-    _display->drawTextRightAlign(128, 23, tmp);
-  } else {
-    _display->setColor(DisplayDriver::LIGHT);
-    snprintf(tmp, sizeof(tmp), "Up: %s", upt);
-    _display->setCursor(0, 23);
+    if (_status->duty_cycle_pct > 0.0f)
+      snprintf(tmp, sizeof(tmp), "DC:%.1f%%", _status->duty_cycle_pct);
+    else
+      snprintf(tmp, sizeof(tmp), "DC:---");
+    _display->setCursor(0, 34);
     _display->print(tmp);
+    if (_status->tx_active) {
+      _display->setColor(DisplayDriver::ORANGE);
+      _display->fillRect(120, 34, 6, 6);
+    }
   }
 
   // Flood filter efficiency
@@ -267,15 +298,35 @@ void UITask::renderPage2() {
   _display->setCursor(0, 27);
   _display->print(tmp);
 
-  // Isolation warning or healthy status
-  if (_status->isolated) {
-    _display->setColor(DisplayDriver::RED);
-    _display->setCursor(0, 39);
-    _display->print("! ISOLATED - no traffic");
-  } else {
-    _display->setColor(DisplayDriver::GREEN);
-    _display->setCursor(0, 39);
-    _display->print("Mesh: OK");
+  // 12h duty cycle bar chart + mesh status
+  // Bars: 12 slots × 10px wide = 120px, max height 8px (proportional to 10% DC limit)
+  {
+    bool any_data = false;
+    for (int i = 0; i < 12; i++) if (_status->hourly_dc_pct[i] > 0) { any_data = true; break; }
+    if (any_data) {
+      for (int i = 0; i < 12; i++) {
+        uint8_t pct = _status->hourly_dc_pct[i];
+        int bx = i * 11;
+        int bh = pct * 8 / 100;
+        if (bh < 1 && pct > 0) bh = 1;
+        DisplayDriver::Color c = (pct > 80) ? DisplayDriver::RED :
+                                  (pct > 60) ? DisplayDriver::ORANGE : DisplayDriver::GREEN;
+        _display->setColor(c);
+        if (bh > 0) _display->fillRect(bx, 39 + (8 - bh), 10, bh);
+        _display->setColor(DisplayDriver::LIGHT);
+        _display->drawRect(bx, 39, 10, 8); // frame
+      }
+    }
+    // Status text right of bars (or full line if no data)
+    if (_status->isolated) {
+      _display->setColor(DisplayDriver::RED);
+      _display->setCursor(0, 49);
+      _display->print("! ISOLATED");
+    } else {
+      _display->setColor(DisplayDriver::GREEN);
+      _display->setCursor(any_data ? 88 : 0, 49);
+      _display->print(any_data ? "OK" : "Mesh: OK");
+    }
   }
 
   renderTimeAndDots();

@@ -569,7 +569,25 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (packet->isRouteFlood()) {
     if (packet->getPathHashCount() >= _prefs.flood_max) return false;
     if (packet->getRouteType() == ROUTE_TYPE_FLOOD && packet->getPathHashCount() >= _prefs.flood_max_unscoped) return false;
-    if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT && packet->getPathHashCount() >= _prefs.flood_max_advert) return false;
+    // Adaptive flood.max.advert: fewer neighbours → allow more hops; dense hub → fewer hops
+    if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT) {
+      uint8_t eff_max_advert = _prefs.flood_max_advert;
+#if MAX_NEIGHBOURS
+      {
+        int nbr = 0;
+        uint32_t ts = getRTCClock()->getCurrentTime();
+        for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+          if (neighbours[i].heard_timestamp > 0 && ts >= neighbours[i].heard_timestamp &&
+              ts - neighbours[i].heard_timestamp < NEIGHBOUR_EXPIRATION_SECS) nbr++;
+        }
+        if      (nbr <= 2)  eff_max_advert = min(255, (int)eff_max_advert * 2);
+        else if (nbr <= 5)  eff_max_advert = min(255, (int)eff_max_advert * 3 / 2);
+        else if (nbr >= 9 && nbr <= 12) eff_max_advert = max(3, (int)eff_max_advert * 3 / 4);
+        else if (nbr > 12)  eff_max_advert = max(2, (int)eff_max_advert / 2);
+      }
+#endif
+      if (packet->getPathHashCount() >= eff_max_advert) return false;
+    }
   }
   if (packet->isRouteFlood() && recv_pkt_region == NULL) {
     MESH_DEBUG_PRINTLN("allowPacketForward: unknown transport code, or wildcard not allowed for FLOOD packet");
@@ -1240,6 +1258,19 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   // reboot counter (loaded from flash in begin())
   _reboot_count = 0;
+
+  // memory watchdog
+  _heap_fail_count  = 0;
+  _next_heap_check  = futureMillis(1800000); // first check 30min after boot
+
+  // last RX tracking
+  _last_rx_pkt_cnt = 0;
+  _last_rx_millis  = millis();
+
+  // hourly DC history
+  memset(_hourly_dc_ms, 0, sizeof(_hourly_dc_ms));
+  _airtime_at_hour_start = 0;
+  _dc_last_rtc_hour      = 255; // 255 = uninitialized
 
   dirty_contacts_expiry = 0;
   set_radio_at = revert_radio_at = 0;
@@ -2049,6 +2080,53 @@ void MyMesh::loop() {
     if (_airtime_window_count < 12) _airtime_window_count++;
   }
 
+  // Track last received packet time (for display "Last RX")
+  {
+    uint32_t pkt_now = radio_driver.getPacketsRecv();
+    if (pkt_now > _last_rx_pkt_cnt) {
+      _last_rx_millis = millis();
+      _last_rx_pkt_cnt = pkt_now;
+    }
+  }
+
+  // Hourly TX duty cycle history (updates when RTC hour changes)
+  {
+    uint32_t rtc_now = getRTCClock()->getCurrentTime();
+    if (rtc_now > 1767225600UL) { // only when RTC valid
+      DateTime dt = DateTime(rtc_now);
+      uint8_t h = dt.hour();
+      if (_dc_last_rtc_hour == 255) { // first run
+        _airtime_at_hour_start = getTotalAirTime();
+        _dc_last_rtc_hour = h;
+      } else if (h != _dc_last_rtc_hour) { // hour changed
+        uint32_t used_ms = getTotalAirTime() - _airtime_at_hour_start;
+        // 0-100 where 100 = 10% duty cycle (ETSI limit)
+        _hourly_dc_ms[_dc_last_rtc_hour] = (uint16_t)min((uint32_t)65535, used_ms);
+        _airtime_at_hour_start = getTotalAirTime();
+        _dc_last_rtc_hour = h;
+      }
+    }
+  }
+
+  // Memory watchdog: proactive reboot if heap is critically low
+  if (millisHasNowPassed(_next_heap_check)) {
+    _next_heap_check = futureMillis(1800000); // check every 30 min
+    void* test = malloc(4096); // try to allocate 4KB
+    if (test) {
+      free(test);
+      _heap_fail_count = 0;
+    } else {
+      _heap_fail_count++;
+      MESH_DEBUG_PRINTLN("Memory watchdog: heap low! fail=%d/3", _heap_fail_count);
+      if (_heap_fail_count >= 3) { // 3 failures = 1.5h of low memory
+        MESH_DEBUG_PRINTLN("Memory watchdog: proactive reboot");
+        _cli.savePrefs(_fs);
+        acl.save(_fs);
+        board.reboot();
+      }
+    }
+  }
+
   // update uptime
   uint32_t now = millis();
   uptime_millis += now - last_millis;
@@ -2079,6 +2157,20 @@ void MyMesh::fillDisplayStatus(RepeaterStatus& s) {
   s.flood_accepted  = _flood_advert_accepted;
   s.flood_rejected  = _flood_advert_rejected;
   s.isolated        = _isolation_advert_pending;
+
+  // TX active indicator
+  s.tx_active = (_mgr->getOutboundTotal() > 0);
+
+  // Last RX time
+  s.last_rx_secs_ago = (uint32_t)((millis() - _last_rx_millis) / 1000);
+
+  // Hourly DC history: last 12 hours, oldest first (0-100 = 0-10% DC)
+  for (int i = 0; i < 12; i++) {
+    uint8_t slot = (uint8_t)((_dc_last_rtc_hour + 24 - 11 + i) % 24);
+    uint32_t used = _hourly_dc_ms[slot];
+    // Scale: 3600000ms per hour, 10% = 360000ms → 100 units
+    s.hourly_dc_pct[i] = (uint8_t)min((uint32_t)100, used / 3600);
+  }
 
   // Packet rate (computed every 60s in loop())
   s.pkt_rate_recv = _pkt_rate_recv;

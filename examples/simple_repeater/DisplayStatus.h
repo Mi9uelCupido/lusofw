@@ -41,7 +41,10 @@ struct RepeaterStatus {
   uint32_t pkt_rate_sent;     // packets sent in the last minute
   float    duty_cycle_pct;    // TX duty cycle % over last 60-min rolling window
   uint32_t reboot_count;      // persistent boot counter (survives power cycles)
-  bool     rtc_valid;         // true when RTC has been synchronised (post-2026)
-  uint8_t  rtc_hour;          // UTC hour  (0-23)
-  uint8_t  rtc_min;           // UTC minute (0-59)
+  bool     rtc_valid;
+  uint8_t  rtc_hour;
+  uint8_t  rtc_min;
+  bool     tx_active;          // TX queue has pending packets right now
+  uint32_t last_rx_secs_ago;   // seconds since last packet received
+  uint8_t  hourly_dc_pct[12];  // last 12h TX duty cycle: 0-100 = 0.0-10.0%, oldest first
 };
