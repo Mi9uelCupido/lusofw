@@ -795,7 +795,18 @@ int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
 
 uint32_t MyMesh::getRetransmitDelay(const mesh::Packet *packet) {
   uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.tx_delay_factor);
-  return getRNG()->nextInt(0, 5*t + 1);
+  uint32_t delay = getRNG()->nextInt(0, 5*t + 1);
+
+  // Priority forwarding: text messages and ACKs are time-sensitive user traffic.
+  // Halve their queue delay so they jump ahead of bulk advert/path floods when
+  // the radio is congested. Adverts already get a longer delay (lower priority).
+  uint8_t pt = packet->getPayloadType();
+  if (pt == PAYLOAD_TYPE_TXT_MSG || pt == PAYLOAD_TYPE_GRP_TXT || pt == PAYLOAD_TYPE_ACK) {
+    delay /= 2;
+  } else if (pt == PAYLOAD_TYPE_ADVERT) {
+    delay += delay / 2; // adverts wait 50% longer — they are the least urgent flood traffic
+  }
+  return delay;
 }
 uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
   uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.direct_tx_delay_factor);
@@ -1180,7 +1191,7 @@ void MyMesh::sendNodeDiscoverReq() {
 
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
-    : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
+    : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(64), tables),
       region_map(key_store), temp_map(key_store),
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       telemetry(MAX_PACKET_PAYLOAD - 4),
@@ -1960,7 +1971,7 @@ void MyMesh::loop() {
         MESH_DEBUG_PRINTLN("Radio watchdog: triggering soft recovery after %d min silence",
                            (int)(_radio_silence_count * 2));
         radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
-        radio_driver.setTxPower(_prefs.tx_power_dbm);
+        applyEffectiveTxPower(); // preserve battery/temp/TPC reductions, don't reset to base
         radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
         _err_flags &= ~ERR_EVENT_STARTRX_TIMEOUT; // clear the stuck flag
         _radio_silence_count = 0;
@@ -2165,11 +2176,16 @@ void MyMesh::fillDisplayStatus(RepeaterStatus& s) {
   s.last_rx_secs_ago = (uint32_t)((millis() - _last_rx_millis) / 1000);
 
   // Hourly DC history: last 12 hours, oldest first (0-100 = 0-10% DC)
-  for (int i = 0; i < 12; i++) {
-    uint8_t slot = (uint8_t)((_dc_last_rtc_hour + 24 - 11 + i) % 24);
-    uint32_t used = _hourly_dc_ms[slot];
-    // Scale: 3600000ms per hour, 10% = 360000ms → 100 units
-    s.hourly_dc_pct[i] = (uint8_t)min((uint32_t)100, used / 3600);
+  if (_dc_last_rtc_hour == 255) {
+    // RTC not yet synced — no history available
+    memset(s.hourly_dc_pct, 0, sizeof(s.hourly_dc_pct));
+  } else {
+    for (int i = 0; i < 12; i++) {
+      uint8_t slot = (uint8_t)((_dc_last_rtc_hour + 24 - 11 + i) % 24);
+      uint32_t used = _hourly_dc_ms[slot];
+      // Scale: 3600000ms per hour, 10% = 360000ms → 100 units
+      s.hourly_dc_pct[i] = (uint8_t)min((uint32_t)100, used / 3600);
+    }
   }
 
   // Packet rate (computed every 60s in loop())
