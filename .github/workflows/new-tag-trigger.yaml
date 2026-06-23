@@ -17,12 +17,7 @@ jobs:
       matrix:
         firmware:
           - Heltec_t114_repeater
-          - Heltec_t114_repeater_bridge_rs232
-          - Heltec_t114_without_display_repeater
-          - Heltec_t114_without_display_repeater_bridge_rs232
           - RAK_4631_repeater
-          - RAK_4631_repeater_bridge_rs232_serial1
-          - RAK_4631_repeater_bridge_rs232_serial2
     steps:
       - name: Clone repository
         uses: actions/checkout@v6
