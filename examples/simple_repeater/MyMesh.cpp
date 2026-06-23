@@ -1397,6 +1397,13 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _airtime_window_count = 1;
   _next_airtime_snap    = futureMillis(300000); // first update in 5 min
 
+  // Prime sensor caches immediately so the display shows values at boot
+  // instead of waiting 30s (battery) / 5min (temperature).
+  _cached_batt_mv     = board.getBattMilliVolts();
+  _cached_temperature = board.getMCUTemperature();
+  _next_batt_check    = futureMillis(30000);
+  _next_temp_check    = futureMillis(60000); // first temp re-check at 60s (was 5min)
+
   // establish default-scope
   {
     RegionEntry* r = region_map.getDefaultRegion();
