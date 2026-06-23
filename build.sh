@@ -155,31 +155,19 @@ build_firmware() {
   # build firmware target
   pio run -e $1
 
-  # build merge-bin for esp32 fresh install, copy .bins to out folder (e.g: Heltec_v3_room_server-v1.0.0-SHA.bin)
-  if [ "$ENV_PLATFORM" == "ESP32_PLATFORM" ]; then
-    pio run -t mergebin -e $1
-    cp .pio/build/$1/firmware.bin out/${FIRMWARE_FILENAME}.bin 2>/dev/null || true
-    cp .pio/build/$1/firmware-merged.bin out/${FIRMWARE_FILENAME}-merged.bin 2>/dev/null || true
-  fi
+  # nRF52: convert hex → uf2 (silent if not applicable)
+  python3 bin/uf2conv/uf2conv.py ".pio/build/$1/firmware.hex" -c \
+      -o ".pio/build/$1/firmware.uf2" -f 0xADA52840 2>/dev/null || true
 
-  # build .uf2 for nrf52 boards, copy .uf2 and .zip to out folder (e.g: RAK_4631_Repeater-v1.0.0-SHA.uf2)
-  if [ "$ENV_PLATFORM" == "NRF52_PLATFORM" ]; then
-    python3 bin/uf2conv/uf2conv.py .pio/build/$1/firmware.hex -c -o .pio/build/$1/firmware.uf2 -f 0xADA52840
-    cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
-    cp .pio/build/$1/firmware.zip out/${FIRMWARE_FILENAME}.zip 2>/dev/null || true
-  fi
+  # ESP32: merge binaries for fresh install (silent if not applicable)
+  pio run -t mergebin -e $1 2>/dev/null || true
 
-  # for stm32, copy .bin and .hex to out folder
-  if [ "$ENV_PLATFORM" == "STM32_PLATFORM" ]; then
-    cp .pio/build/$1/firmware.bin out/${FIRMWARE_FILENAME}.bin 2>/dev/null || true
-    cp .pio/build/$1/firmware.hex out/${FIRMWARE_FILENAME}.hex 2>/dev/null || true
-  fi
-
-  # for rp2040, copy .bin and .uf2 to out folder
-  if [ "$ENV_PLATFORM" == "RP2040_PLATFORM" ]; then
-    cp .pio/build/$1/firmware.bin out/${FIRMWARE_FILENAME}.bin 2>/dev/null || true
-    cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
-  fi
+  # Copy every output format that exists to out/ (safe — silently skips missing files)
+  cp ".pio/build/$1/firmware.uf2"         "out/${FIRMWARE_FILENAME}.uf2"         2>/dev/null || true
+  cp ".pio/build/$1/firmware.zip"         "out/${FIRMWARE_FILENAME}.zip"         2>/dev/null || true
+  cp ".pio/build/$1/firmware.bin"         "out/${FIRMWARE_FILENAME}.bin"         2>/dev/null || true
+  cp ".pio/build/$1/firmware.hex"         "out/${FIRMWARE_FILENAME}.hex"         2>/dev/null || true
+  cp ".pio/build/$1/firmware-merged.bin"  "out/${FIRMWARE_FILENAME}-merged.bin"  2>/dev/null || true
 
 }
 
