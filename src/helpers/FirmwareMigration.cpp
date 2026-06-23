@@ -3,6 +3,14 @@
 #include <MeshCore.h>
 #include <string.h>
 
+static void v2026_6_1(NodePrefs& prefs) {
+  // MeshCore v1.16.0: initialize new flood limit fields
+  // Without this, devices upgrading from 2026.5.x would have these at 0,
+  // which would block ALL unscoped floods and ALL advert forwards.
+  if (prefs.flood_max_unscoped == 0) prefs.flood_max_unscoped = 64;
+  if (prefs.flood_max_advert   == 0) prefs.flood_max_advert   = 8;
+}
+
 static void v2026_5_1(NodePrefs& prefs) {
   prefs.flood_advert_base = 0.308f;
 
@@ -42,10 +50,11 @@ static void v0_0_1(NodePrefs &prefs) {
 }
 
 const FirmwareMigration::VersionEntry FirmwareMigration::s_versions[] = {
-  { "v0.0.1", v0_0_1 },
-  { "v0.0.6", v0_0_6 },
-  { "v0.0.7", v0_0_7 },
+  { "v0.0.1",   v0_0_1   },
+  { "v0.0.6",   v0_0_6   },
+  { "v0.0.7",   v0_0_7   },
   { "2026.5.1", v2026_5_1 },
+  { "2026.6.1", v2026_6_1 },
 };
 
 int FirmwareMigration::findVersionIndex(const char* version) {

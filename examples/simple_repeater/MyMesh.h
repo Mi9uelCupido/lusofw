@@ -91,7 +91,7 @@ struct TimeSample {
 #endif
 
 #ifndef LUSOFW_FIRMWARE_VERSION
-  #define LUSOFW_FIRMWARE_VERSION "2026.5.2"
+  #define LUSOFW_FIRMWARE_VERSION "2026.6.1"
 #endif
 
 #define FIRMWARE_ROLE "repeater"
