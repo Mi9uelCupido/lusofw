@@ -1867,14 +1867,12 @@ void MyMesh::loop() {
       }
 
       if (adverts_sent >= ADVERTS_ALLOWED_COUNT) {
-        // already sent max allowed adverts in this period
+        // already sent max allowed adverts in this period — skip scheduling,
+        // but DON'T return: the rest of loop() (watchdogs, sensors, display) must run.
         MESH_DEBUG_PRINTLN("%s Max advert count reached (%d) for current period, skipping", getLogDateTime(),
                            ADVERTS_ALLOWED_COUNT);
-        return;
-      }
-
-      // checks if flood adverts are disabled, or if we already have one scheduled, before scheduling next one
-      if (next_flood_advert == 0 && _prefs.flood_advert_interval > 0) {
+      } else if (next_flood_advert == 0 && _prefs.flood_advert_interval > 0) {
+        // checks if flood adverts are disabled, or if we already have one scheduled, before scheduling next one
         updateFloodAdvertTimer();
       }
     } else if (adverts_sent > 0) {
