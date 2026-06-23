@@ -173,6 +173,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   // weekly maintenance reboot
   unsigned long _next_reboot_check;
 
+  // cached sensor readings — updated by power management timers, not every loop
+  uint16_t _cached_batt_mv;
+  float    _cached_temperature;
+
   // flood advert filter efficiency counters
   uint32_t _flood_advert_accepted;
   uint32_t _flood_advert_rejected;

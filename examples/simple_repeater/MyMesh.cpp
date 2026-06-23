@@ -1206,6 +1206,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   // weekly reboot
   _next_reboot_check = futureMillis(3600000);
 
+  // cached sensor readings (updated by timers, not every loop)
+  _cached_batt_mv    = 0;
+  _cached_temperature = NAN;
+
   // flood filter stats
   _flood_advert_accepted = 0;
   _flood_advert_rejected = 0;
@@ -1883,8 +1887,9 @@ void MyMesh::loop() {
   // Only active when board reports a valid voltage (> 1000 mV).
   // Thresholds set via build flags: BATT_LOW_THRESHOLD_MV and BATT_LOW_TX_POWER_DBM.
   if (millisHasNowPassed(_next_batt_check)) {
-    _next_batt_check = futureMillis(60000); // re-check every 60s
+    _next_batt_check = futureMillis(60000);
     uint16_t batt_mv = board.getBattMilliVolts();
+    _cached_batt_mv  = batt_mv; // cache — fillDisplayStatus() reads this
     if (batt_mv > 1000) {
       bool is_low = (batt_mv < BATT_LOW_THRESHOLD_MV);
       if (is_low && !_batt_tx_reduced) {
@@ -1943,6 +1948,7 @@ void MyMesh::loop() {
   if (millisHasNowPassed(_next_temp_check)) {
     _next_temp_check = futureMillis(300000); // re-check every 5 minutes
     float temp = board.getMCUTemperature();
+    _cached_temperature = temp; // cache — fillDisplayStatus() reads this
     if (!isnan(temp)) {
       if (temp >= TEMP_HIGH_C && !_temp_tx_reduced) {
         _temp_tx_reduced = true;
@@ -2057,9 +2063,9 @@ void MyMesh::fillDisplayStatus(RepeaterStatus& s) {
   s.pkts_recv       = radio_driver.getPacketsRecv();
   s.pkts_sent       = radio_driver.getPacketsSent();
   s.last_snr        = radio_driver.getLastSNR();
-  s.batt_mv         = board.getBattMilliVolts();
-  s.batt_pct        = (s.batt_mv >= 1000) ? voltToBattPct(s.batt_mv) : 255;
-  s.temperature     = board.getMCUTemperature();
+  s.batt_mv         = _cached_batt_mv;
+  s.batt_pct        = (_cached_batt_mv >= 1000) ? voltToBattPct(_cached_batt_mv) : 255;
+  s.temperature     = _cached_temperature;
   s.tx_power_cfg    = _prefs.tx_power_dbm;
   s.tpc_offset_dbm  = _tpc_offset_dbm;
   s.batt_tx_reduced = _batt_tx_reduced;
