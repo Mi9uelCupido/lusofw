@@ -59,6 +59,9 @@
   #define ISOLATION_ADVERT_COOLDOWN_MS (4UL * 3600000UL)
   #define ISOLATION_MIN_UPTIME_SECS    7200UL
 #endif
+#ifndef ISOLATION_BOOST_DBM
+  #define ISOLATION_BOOST_DBM 22  // ETSI/SX1262 conducted ceiling — never exceed
+#endif
 #ifndef WEEKLY_REBOOT_HOUR
   #define WEEKLY_REBOOT_HOUR              3
   #define WEEKLY_REBOOT_MIN              30
@@ -1782,9 +1785,6 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   } else if (memcmp(command, "test.boost", 10) == 0) {
     // Manually trigger the isolation power-boost advert for testing.
     // Sends one zero-hop advert at the boost power level, then restores.
-#ifndef ISOLATION_BOOST_DBM
-    #define ISOLATION_BOOST_DBM 22
-#endif
     int8_t boost = ISOLATION_BOOST_DBM;
     if (boost > 22) boost = 22;
     if (_batt_tx_reduced) {
@@ -1947,9 +1947,6 @@ void MyMesh::loop() {
       // Isolation boost: temporarily raise TX power to the legal ceiling to try
       // to reach a distant node, then restore. SX1262 hard-caps at 22 dBm conducted
       // (ETSI 869 MHz). We boost up to ISOLATION_BOOST_DBM but never above 22.
-#ifndef ISOLATION_BOOST_DBM
-      #define ISOLATION_BOOST_DBM 22  // ETSI/SX1262 conducted ceiling
-#endif
       int8_t boost = ISOLATION_BOOST_DBM;
       if (boost > 22) boost = 22; // hard safety cap — never exceed conducted limit
 
