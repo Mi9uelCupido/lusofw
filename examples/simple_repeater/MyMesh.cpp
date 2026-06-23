@@ -1772,6 +1772,23 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+  } else if (memcmp(command, "test.boost", 10) == 0) {
+    // Manually trigger the isolation power-boost advert for testing.
+    // Sends one zero-hop advert at the boost power level, then restores.
+#ifndef ISOLATION_BOOST_DBM
+    #define ISOLATION_BOOST_DBM 22
+#endif
+    int8_t boost = ISOLATION_BOOST_DBM;
+    if (boost > 22) boost = 22;
+    if (_batt_tx_reduced) {
+      sendSelfAdvertisement(500, false);
+      sprintf(reply, "OK - batt low, normal-power advert (no boost)");
+    } else {
+      radio_driver.setTxPower(boost);
+      sendSelfAdvertisement(500, false);
+      applyEffectiveTxPower();
+      sprintf(reply, "OK - boost advert sent at %d dBm", boost);
+    }
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -2225,11 +2242,17 @@ void MyMesh::fillDisplayStatus(RepeaterStatus& s) {
   // Persistent reboot counter
   s.reboot_count = _reboot_count;
 
-  // RTC time (valid only after clock sync)
+  // RTC time for display (valid only after clock sync).
+  // RTC stays in UTC (required for advert window + inter-node time sync);
+  // DISPLAY_TZ_OFFSET_HOURS shifts only the displayed time. Portugal: +1 (WEST/summer), 0 (WET/winter).
+#ifndef DISPLAY_TZ_OFFSET_HOURS
+  #define DISPLAY_TZ_OFFSET_HOURS 1
+#endif
   uint32_t now_rtc = getRTCClock()->getCurrentTime();
   s.rtc_valid = (now_rtc > 1767225600UL); // valid after 2026-01-01
   if (s.rtc_valid) {
-    DateTime dt = DateTime(now_rtc);
+    uint32_t local = now_rtc + (int32_t)DISPLAY_TZ_OFFSET_HOURS * 3600;
+    DateTime dt = DateTime(local);
     s.rtc_hour = dt.hour();
     s.rtc_min  = dt.minute();
   } else {
