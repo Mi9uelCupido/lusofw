@@ -1922,8 +1922,27 @@ void MyMesh::loop() {
     bool uptime_ok = (uptime_millis / 1000 >= ISOLATION_MIN_UPTIME_SECS);
     if (_isolation_silence_count >= ISOLATION_SILENCE_HOURS &&
         !_isolation_advert_pending && uptime_ok) {
-      MESH_DEBUG_PRINTLN("Isolation detected: sending emergency zero-hop advert");
-      sendSelfAdvertisement(500, false); // zero-hop only — respects duty cycle budget
+      // Isolation boost: temporarily raise TX power to the legal ceiling to try
+      // to reach a distant node, then restore. SX1262 hard-caps at 22 dBm conducted
+      // (ETSI 869 MHz). We boost up to ISOLATION_BOOST_DBM but never above 22.
+#ifndef ISOLATION_BOOST_DBM
+      #define ISOLATION_BOOST_DBM 22  // ETSI/SX1262 conducted ceiling
+#endif
+      int8_t boost = ISOLATION_BOOST_DBM;
+      if (boost > 22) boost = 22; // hard safety cap — never exceed conducted limit
+
+      // Don't boost when battery is low — battery protection takes priority over reach.
+      // A low battery boosting to max could brown out the node.
+      if (_batt_tx_reduced) {
+        MESH_DEBUG_PRINTLN("Isolation detected: battery low, normal-power advert (no boost)");
+        sendSelfAdvertisement(500, false);
+      } else {
+        MESH_DEBUG_PRINTLN("Isolation detected: boosting to %d dBm + emergency advert", boost);
+        radio_driver.setTxPower(boost);
+        sendSelfAdvertisement(500, false); // zero-hop only — respects duty cycle budget
+        applyEffectiveTxPower(); // restore correct effective power (temp/TPC may be active)
+      }
+
       _isolation_advert_pending = true;
       _isolation_advert_cooldown = futureMillis(ISOLATION_ADVERT_COOLDOWN_MS);
       _isolation_silence_count = 0;

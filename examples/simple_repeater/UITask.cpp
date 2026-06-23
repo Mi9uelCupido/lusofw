@@ -178,36 +178,25 @@ void UITask::renderPage1() {
   _display->setColor(DisplayDriver::LIGHT);
   formatPktCount(ra, _status->pkts_recv);
   formatPktCount(ta, _status->pkts_sent);
-  snprintf(tmp, sizeof(tmp), "RX:%-5s TX:%-5s %lu/m",
-           ra, ta, _status->pkt_rate_recv);
+  snprintf(tmp, sizeof(tmp), "RX:%-5s TX:%-5s", ra, ta);
   _display->setCursor(0, 0);
   _display->print(tmp);
 
   // Neighbours + SNR value + signal bars
-  snprintf(tmp, sizeof(tmp), "Nbrs:%-3d SNR:%+.0fdB",
-           _status->neighbour_count, _status->last_snr);
-  _display->setCursor(0, 12);
+  snprintf(tmp, sizeof(tmp), "Nbrs:%-2d SNR:%+.0f", _status->neighbour_count, _status->last_snr);
+  _display->setCursor(0, 11);
   _display->print(tmp);
-  drawSNRBars(_display, 108, 12, _status->last_snr);
+  drawSNRBars(_display, 110, 11, _status->last_snr);
 
-  // Uptime + last RX
+  // Uptime
   char upt[20];
   formatUptime(upt, _status->uptime_secs);
-  {
-    // Format last RX time
-    char lrx[12];
-    uint32_t s = _status->last_rx_secs_ago;
-    if      (s < 60)     snprintf(lrx, sizeof(lrx), "%us", (unsigned)s);
-    else if (s < 3600)   snprintf(lrx, sizeof(lrx), "%um", (unsigned)(s/60));
-    else if (s < 86400)  snprintf(lrx, sizeof(lrx), "%uh", (unsigned)(s/3600));
-    else                 snprintf(lrx, sizeof(lrx), "%ud", (unsigned)(s/86400));
-    snprintf(tmp, sizeof(tmp), "Up:%s LRX:%s", upt, lrx);
-    _display->setColor(DisplayDriver::LIGHT);
-    _display->setCursor(0, 23);
-    _display->print(tmp);
-  }
+  snprintf(tmp, sizeof(tmp), "Up: %s", upt);
+  _display->setColor(DisplayDriver::LIGHT);
+  _display->setCursor(0, 22);
+  _display->print(tmp);
 
-  // Duty cycle + TX active indicator
+  // Duty cycle (left) + RX rate (right) + TX indicator
   {
     DisplayDriver::Color dc_color = (_status->duty_cycle_pct < 8.0f)
                                     ? DisplayDriver::GREEN : DisplayDriver::ORANGE;
@@ -216,11 +205,17 @@ void UITask::renderPage1() {
       snprintf(tmp, sizeof(tmp), "DC:%.1f%%", _status->duty_cycle_pct);
     else
       snprintf(tmp, sizeof(tmp), "DC:---");
-    _display->setCursor(0, 34);
+    _display->setCursor(0, 33);
     _display->print(tmp);
+
+    _display->setColor(DisplayDriver::LIGHT);
+    snprintf(tmp, sizeof(tmp), "%lu/m", _status->pkt_rate_recv);
+    _display->setCursor(64, 33);
+    _display->print(tmp);
+
     if (_status->tx_active) {
       _display->setColor(DisplayDriver::ORANGE);
-      _display->fillRect(120, 34, 6, 6);
+      _display->fillRect(120, 33, 6, 6);
     }
   }
 
@@ -228,14 +223,14 @@ void UITask::renderPage1() {
   uint32_t total_ff = _status->flood_accepted + _status->flood_rejected;
   if (total_ff > 0) {
     uint8_t pct = (uint8_t)(_status->flood_rejected * 100 / total_ff);
-    snprintf(tmp, sizeof(tmp), "FF:+%lu -%lu (%u%%)",
+    snprintf(tmp, sizeof(tmp), "FF:+%lu -%lu %u%%",
              _status->flood_accepted, _status->flood_rejected, pct);
     _display->setColor(pct > 80 ? DisplayDriver::ORANGE : DisplayDriver::LIGHT);
   } else {
-    snprintf(tmp, sizeof(tmp), "FF: no data yet");
+    snprintf(tmp, sizeof(tmp), "FF: ---");
     _display->setColor(DisplayDriver::LIGHT);
   }
-  _display->setCursor(0, 34);
+  _display->setCursor(0, 44);
   _display->print(tmp);
 
   renderTimeAndDots();
