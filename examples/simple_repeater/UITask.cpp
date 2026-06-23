@@ -220,7 +220,7 @@ void UITask::renderPage2() {
     _display->setColor(DisplayDriver::LIGHT);
     _display->setCursor(0, 20);
     _display->print("No data");
-    renderPageDots();
+    renderTimeAndDots();
     return;
   }
 
