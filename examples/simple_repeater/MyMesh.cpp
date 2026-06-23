@@ -566,7 +566,11 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (_prefs.disable_fwd) return false;
-  if (packet->isRouteFlood() && packet->getPathHashCount() >= _prefs.flood_max) return false;
+  if (packet->isRouteFlood()) {
+    if (packet->getPathHashCount() >= _prefs.flood_max) return false;
+    if (packet->getRouteType() == ROUTE_TYPE_FLOOD && packet->getPathHashCount() >= _prefs.flood_max_unscoped) return false;
+    if (packet->getPayloadType() == PAYLOAD_TYPE_ADVERT && packet->getPathHashCount() >= _prefs.flood_max_advert) return false;
+  }
   if (packet->isRouteFlood() && recv_pkt_region == NULL) {
     MESH_DEBUG_PRINTLN("allowPacketForward: unknown transport code, or wildcard not allowed for FLOOD packet");
     return false;
@@ -649,7 +653,7 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
       }
 #endif
 
-      if (packet->path_len == 0) {
+      if (packet->getPathHashCount() == 0) {
         MESH_DEBUG_PRINTLN("Flood advert: path_len=0, allowing forward");
         _flood_advert_accepted++;
         return true; // Always allow zero-hop adverts through
@@ -870,7 +874,7 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
   mesh::Mesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len); // chain to super impl
 
   // if this a zero hop advert (and not via 'Share'), add it to neighbours
-  if (packet->path_len == 0 && !isShare(packet)) {
+  if (packet->getPathHashCount() == 0 && !isShare(packet)) {
     AdvertDataParser parser(app_data, app_data_len);
     if (parser.isValid() && parser.getType() == ADV_TYPE_REPEATER) { // just keep neigbouring Repeaters
       putNeighbour(id, timestamp, packet->getSNR());
@@ -1267,11 +1271,13 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.bw = LORA_BW;
   _prefs.cr = LORA_CR;
   _prefs.tx_power_dbm = LORA_TX_POWER;
-  _prefs.advert_interval = 0;        // defaults to disabled on lusofw
-  _prefs.flood_advert_interval = 24; // defaults to 24h on lusofw, when >0 enabled our custom advert handling
-  _prefs.flood_advert_base = 0.308f;
+  _prefs.advert_interval = 0;        // lusofw: disabled by default
+  _prefs.flood_advert_interval = 24; // lusofw: 24h (upstream default: 47h)
+  _prefs.flood_advert_base = 0.308f; // lusofw: probabilistic flood filter
   _prefs.flood_max = 64;
-  _prefs.interference_threshold = 14; // enable listen before talk
+  _prefs.flood_max_unscoped = 64;    // v1.16.0: new unscoped flood limit
+  _prefs.flood_max_advert = 8;       // v1.16.0: new advert hop limit (default 8)
+  _prefs.interference_threshold = 14; // lusofw: listen before talk enabled
 
   // bridge defaults
   _prefs.bridge_enabled = 1;    // enabled
@@ -1386,8 +1392,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   }
 #endif
 
-  radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
-  radio_set_tx_power(_prefs.tx_power_dbm);
+  radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  radio_driver.setTxPower(_prefs.tx_power_dbm);
 
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
@@ -1509,7 +1515,7 @@ void MyMesh::dumpLogFile() {
 }
 
 void MyMesh::setTxPower(int8_t power_dbm) {
-  radio_set_tx_power(power_dbm);
+  radio_driver.setTxPower(power_dbm);
 }
 
 #if defined(USE_SX1262) || defined(USE_SX1268)
@@ -1732,7 +1738,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 // Centralised TX power application.
 // Priority (highest wins): battery absolute limit > TPC relative offset.
 // Temperature is always a further reduction applied on top of both.
-// All power management code MUST call this instead of radio_set_tx_power() directly.
+// All power management code MUST call this instead of radio_driver.setTxPower() directly.
 void MyMesh::applyEffectiveTxPower() {
   int8_t power = _prefs.tx_power_dbm;
 #if defined(BATT_LOW_TX_POWER_DBM)
@@ -1745,7 +1751,7 @@ void MyMesh::applyEffectiveTxPower() {
   power += _tpc_offset_dbm;
 #endif
   if (_temp_tx_reduced) power -= TEMP_TX_REDUCE_DBM;
-  radio_set_tx_power(power);
+  radio_driver.setTxPower(power);
   MESH_DEBUG_PRINTLN("TX power: %d dBm (cfg=%d tpc=%d batt=%d temp=%d)",
                      power, _prefs.tx_power_dbm, _tpc_offset_dbm,
                      _batt_tx_reduced, _temp_tx_reduced);
@@ -1822,13 +1828,13 @@ void MyMesh::loop() {
 
   if (set_radio_at && millisHasNowPassed(set_radio_at)) { // apply pending (temporary) radio params
     set_radio_at = 0;                                     // clear timer
-    radio_set_params(pending_freq, pending_bw, pending_sf, pending_cr);
+    radio_driver.setParams(pending_freq, pending_bw, pending_sf, pending_cr);
     MESH_DEBUG_PRINTLN("Temp radio params");
   }
 
   if (revert_radio_at && millisHasNowPassed(revert_radio_at)) { // revert radio params to orig
     revert_radio_at = 0;                                        // clear timer
-    radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+    radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
     MESH_DEBUG_PRINTLN("Radio params restored");
   }
 
@@ -1922,8 +1928,8 @@ void MyMesh::loop() {
       if (_radio_silence_count >= 5) {
         MESH_DEBUG_PRINTLN("Radio watchdog: triggering soft recovery after %d min silence",
                            (int)(_radio_silence_count * 2));
-        radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
-        radio_set_tx_power(_prefs.tx_power_dbm);
+        radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+        radio_driver.setTxPower(_prefs.tx_power_dbm);
         radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
         _err_flags &= ~ERR_EVENT_STARTRX_TIMEOUT; // clear the stuck flag
         _radio_silence_count = 0;
