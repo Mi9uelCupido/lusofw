@@ -152,8 +152,16 @@ build_firmware() {
   # disable debug flags if requested
   disable_debug_flags
 
-  # build firmware target
-  pio run -e $1
+  # build firmware target — exit with error if compilation fails
+  if ! pio run -e $1; then
+    echo "ERROR: pio run failed for target '$1' — aborting"
+    exit 1
+  fi
+
+  # diagnose: list what was generated
+  echo "--- Build output for $1 ---"
+  ls -la ".pio/build/$1/" 2>/dev/null || echo "(build dir not found)"
+  echo "---------------------------"
 
   # nRF52: convert hex → uf2 (silent if not applicable)
   python3 bin/uf2conv/uf2conv.py ".pio/build/$1/firmware.hex" -c \
