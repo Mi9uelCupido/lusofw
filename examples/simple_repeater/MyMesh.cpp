@@ -43,6 +43,29 @@
 
 #define FIRMWARE_VER_LEVEL       2
 
+// ── lusofw feature thresholds (all overridable via build flags) ──────────────
+#ifndef TEMP_HIGH_C
+  #define TEMP_HIGH_C          72.0f
+  #define TEMP_NORMAL_C        62.0f
+  #define TEMP_TX_REDUCE_DBM   4
+#endif
+#ifndef TPC_SNR_HIGH
+  #define TPC_SNR_HIGH         15.0f
+  #define TPC_SNR_LOW           5.0f
+  #define TPC_REDUCE_DBM        3
+#endif
+#ifndef ISOLATION_SILENCE_HOURS
+  #define ISOLATION_SILENCE_HOURS      8
+  #define ISOLATION_ADVERT_COOLDOWN_MS (4UL * 3600000UL)
+  #define ISOLATION_MIN_UPTIME_SECS    7200UL
+#endif
+#ifndef WEEKLY_REBOOT_HOUR
+  #define WEEKLY_REBOOT_HOUR              3
+  #define WEEKLY_REBOOT_MIN              30
+  #define WEEKLY_REBOOT_MIN_UPTIME_SECS  (6UL * 24 * 3600)
+#endif
+// ─────────────────────────────────────────────────────────────────────────────
+
 #define REQ_TYPE_GET_STATUS         0x01 // same as _GET_STATS
 #define REQ_TYPE_KEEP_ALIVE         0x02
 #define REQ_TYPE_GET_TELEMETRY_DATA 0x03
@@ -63,7 +86,7 @@
 #define NEIGHBOUR_EXPIRATION_SECS    (60 * 60 * 24 * 2) // 2 days
 
 #define ADVERTS_ALLOWED_START        2 // hours >=
-#define ADVERTS_ALLOWED_END          5 // hours <=
+#define ADVERTS_ALLOWED_END          7 // hours <= (02:00-07:59 UTC)
 #define ADVERTS_ALLOWED_COUNT        1
 
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
@@ -93,10 +116,12 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
     }
   }
 
-  // update neighbour info
+  // update neighbour info — shift SNR history before overwriting
   neighbour->id = id;
   neighbour->advert_timestamp = timestamp;
   neighbour->heard_timestamp = getRTCClock()->getCurrentTime();
+  neighbour->snr_h2 = neighbour->snr_h1;
+  neighbour->snr_h1 = neighbour->snr;
   neighbour->snr = (int8_t)(snr * 4);
 #endif
 }
@@ -151,16 +176,8 @@ void MyMesh::applyTimeConsensus() {
   int min_samples = is_initial_sync ? 5 : TIME_SYNC_SAMPLES;
   if (valid_count < min_samples) return;
 
-  // Bubble sort offsets to enable trimmed mean calculation
-  for (int i = 0; i < valid_count - 1; i++) {
-    for (int j = 0; j < valid_count - i - 1; j++) {
-      if (valid_offsets[j] > valid_offsets[j + 1]) {
-        int32_t temp = valid_offsets[j];
-        valid_offsets[j] = valid_offsets[j + 1];
-        valid_offsets[j + 1] = temp;
-      }
-    }
-  }
+  // Sort offsets using std::sort (consistent with rest of codebase, O(n log n))
+  std::sort(valid_offsets, valid_offsets + valid_count, [](int32_t a, int32_t b) { return a < b; });
   
   // Calculate trimmed mean: discard 25% from each end to remove outliers
   // With 8 samples: trim=2, use indices [2,3,4,5] = middle 4 samples
@@ -604,21 +621,52 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
         base_value = 0.308f;
       }
 
+      // Adapt flood probability to active neighbour density.
+      // A hub with many neighbours should be more selective (reduce congestion).
+      // An edge node with few neighbours should be more aggressive (ensure coverage).
+      // Scale is applied on top of the user-configured base value.
+#if MAX_NEIGHBOURS
+      {
+        int active_count = 0;
+        uint32_t now_ts = getRTCClock()->getCurrentTime();
+        for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+          if (neighbours[i].heard_timestamp > 0 &&
+              now_ts >= neighbours[i].heard_timestamp &&
+              now_ts - neighbours[i].heard_timestamp < NEIGHBOUR_EXPIRATION_SECS) {
+            active_count++;
+          }
+        }
+        float scale;
+        if      (active_count <= 2)  scale = 1.6f;  // very sparse  → propagate aggressively
+        else if (active_count <= 5)  scale = 1.2f;  // sparse       → slightly more aggressive
+        else if (active_count <= 8)  scale = 1.0f;  // moderate     → use configured value
+        else if (active_count <= 12) scale = 0.75f; // dense        → more selective
+        else                         scale = 0.60f; // very dense   → maximum selectivity
+        base_value *= scale;
+        base_value = (base_value < 0.15f) ? 0.15f : (base_value > 0.65f ? 0.65f : base_value);
+        MESH_DEBUG_PRINTLN("Adaptive flood: neighbours=%d scale=%.2f base=%.3f",
+                           active_count, scale, base_value);
+      }
+#endif
+
       if (packet->path_len == 0) {
         MESH_DEBUG_PRINTLN("Flood advert: path_len=0, allowing forward");
+        _flood_advert_accepted++;
         return true; // Always allow zero-hop adverts through
       }
 
-      double_t roll_dice = (double)rand() / RAND_MAX;
+      double_t roll_dice = (double)getRNG()->nextInt(0, 10000) / 10000.0;
       double_t forw_prob = pow(base_value, packet->path_len - 1);
       MESH_DEBUG_PRINTLN("Flood advert filter: path_len=%d, roll=%.3f, prob=%.3f, base=%.3f",
                          packet->path_len, roll_dice, forw_prob, base_value);
 
       if (roll_dice > forw_prob) {
         MESH_DEBUG_PRINTLN("Flood advert REJECTED by probabilistic filter");
+        _flood_advert_rejected++;
         return false;
       } else {
         MESH_DEBUG_PRINTLN("Flood advert ACCEPTED for forwarding");
+        _flood_advert_accepted++;
       }
 
     }
@@ -1130,6 +1178,61 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   next_advert_check = futureMillis(30000);
   next_local_advert = next_flood_advert = next_flood_advert_offset = 0;
 
+  // boot advert: 3 zero-hop adverts at 60s/120s/180s after startup
+  _boot_advert_count = 0;
+  _next_boot_advert = futureMillis(60000);
+
+  // boot node discover: populate neighbour table 90s after startup
+  _boot_discover_sent = false;
+  _next_boot_discover = futureMillis(90000);
+
+  // battery-adaptive TX power
+  _batt_tx_reduced = false;
+  _next_batt_check = futureMillis(30000);
+
+  // radio watchdog
+  _radio_silence_count = 0;
+  _radio_last_pkt_count = 0;
+  _next_radio_watchdog = futureMillis(120000);
+
+  // temperature-aware TX power
+  _temp_tx_reduced = false;
+  _next_temp_check = futureMillis(300000);
+
+  // TPC
+  _tpc_offset_dbm = 0;
+  _next_tpc_check = futureMillis(1800000);
+
+  // weekly reboot
+  _next_reboot_check = futureMillis(3600000);
+
+  // flood filter stats
+  _flood_advert_accepted = 0;
+  _flood_advert_rejected = 0;
+
+  // isolation detection
+  _isolation_silence_count = 0;
+  _isolation_last_pkt_count = 0;
+  _isolation_advert_pending = false;
+  _next_isolation_check = futureMillis(3600000);
+  _isolation_advert_cooldown = 0;
+
+  // packet rate
+  _pkt_rate_recv = 0;
+  _pkt_rate_sent = 0;
+  _rate_last_recv = 0;
+  _rate_last_sent = 0;
+  _next_rate_update = futureMillis(60000);
+
+  // duty cycle rolling window
+  memset(_airtime_window, 0, sizeof(_airtime_window));
+  _airtime_window_idx   = 0;
+  _airtime_window_count = 0;
+  _next_airtime_snap    = futureMillis(300000);
+
+  // reboot counter (loaded from flash in begin())
+  _reboot_count = 0;
+
   dirty_contacts_expiry = 0;
   set_radio_at = revert_radio_at = 0;
   _logging = false;
@@ -1216,6 +1319,31 @@ void MyMesh::begin(FILESYSTEM *fs) {
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
+
+  // Persistent reboot counter — read, increment, write back
+  {
+    uint32_t cnt = 1;
+    File fr = _fs->open("/reboot_cnt");
+    if (fr && fr.size() >= 4) {
+      uint32_t saved = 0;
+      fr.read((uint8_t*)&saved, 4);
+      cnt = saved + 1;
+    }
+    if (fr) fr.close();
+    _reboot_count = cnt;
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+    File fw = _fs->open("/reboot_cnt", FILE_O_WRITE);
+#else
+    File fw = _fs->open("/reboot_cnt", "w");
+#endif
+    if (fw) { fw.write((uint8_t*)&cnt, 4); fw.close(); }
+  }
+
+  // Baseline airtime snapshot for duty cycle window
+  _airtime_window[0]    = getTotalAirTime();
+  _airtime_window_idx   = 1;
+  _airtime_window_count = 1;
+  _next_airtime_snap    = futureMillis(300000); // first update in 5 min
 
   // establish default-scope
   {
@@ -1418,7 +1546,13 @@ void MyMesh::formatNeighborsReply(char *reply) {
 
     // add next neighbour
     uint32_t secs_ago = getRTCClock()->getCurrentTime() - neighbour->heard_timestamp;
-    sprintf(dp, "%s:%d:%d", hex, secs_ago, neighbour->snr);
+    // SNR trend: '+' improving, '-' degrading, '=' stable (threshold: 1 dB = 4 units)
+    char trend = '=';
+    if (neighbour->snr_h1 != 0) {
+      if      (neighbour->snr > neighbour->snr_h1 + 4) trend = '+';
+      else if (neighbour->snr < neighbour->snr_h1 - 4) trend = '-';
+    }
+    sprintf(dp, "%s:%d:%d:%c", hex, secs_ago, neighbour->snr, trend);
     while (*dp)
       dp++; // find end of string
   }
@@ -1469,8 +1603,16 @@ void MyMesh::formatRadioStatsReply(char *reply) {
 }
 
 void MyMesh::formatPacketStatsReply(char *reply) {
-  StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(), getNumSentDirect(), 
+  StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(), getNumSentDirect(),
                                        getNumRecvFlood(), getNumRecvDirect());
+  // Append flood advert filter efficiency (acc=accepted, rej=rejected)
+  size_t len = strlen(reply);
+  uint32_t total = _flood_advert_accepted + _flood_advert_rejected;
+  uint8_t  pct   = (total > 0) ? (uint8_t)(_flood_advert_rejected * 100 / total) : 0;
+  if (len < 130) {
+    snprintf(reply + len, 160 - len, "\nFF:+%lu -%lu (%u%% filt)",
+             _flood_advert_accepted, _flood_advert_rejected, pct);
+  }
 }
 
 void MyMesh::saveIdentity(const mesh::LocalIdentity &new_id) {
@@ -1583,6 +1725,28 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 }
 
+// Centralised TX power application.
+// Priority (highest wins): battery absolute limit > TPC relative offset.
+// Temperature is always a further reduction applied on top of both.
+// All power management code MUST call this instead of radio_set_tx_power() directly.
+void MyMesh::applyEffectiveTxPower() {
+  int8_t power = _prefs.tx_power_dbm;
+#if defined(BATT_LOW_TX_POWER_DBM)
+  if (_batt_tx_reduced) {
+    power = BATT_LOW_TX_POWER_DBM;  // absolute override — battery critical
+  } else {
+    power += _tpc_offset_dbm;       // relative reduction
+  }
+#else
+  power += _tpc_offset_dbm;
+#endif
+  if (_temp_tx_reduced) power -= TEMP_TX_REDUCE_DBM;
+  radio_set_tx_power(power);
+  MESH_DEBUG_PRINTLN("TX power: %d dBm (cfg=%d tpc=%d batt=%d temp=%d)",
+                     power, _prefs.tx_power_dbm, _tpc_offset_dbm,
+                     _batt_tx_reduced, _temp_tx_reduced);
+}
+
 void MyMesh::loop() {
 #ifdef WITH_BRIDGE
   bridge.loop();
@@ -1664,10 +1828,213 @@ void MyMesh::loop() {
     MESH_DEBUG_PRINTLN("Radio params restored");
   }
 
+  // Boot advert: 3 zero-hop adverts at 60s/120s/180s after startup.
+  // Three transmissions maximise probability of being heard by at least one
+  // neighbour without meaningfully impacting duty cycle (3 × ~200ms ≪ 10%).
+  if (_boot_advert_count < 3 && _next_boot_advert && millisHasNowPassed(_next_boot_advert)) {
+    _boot_advert_count++;
+    sendSelfAdvertisement(500, false); // zero-hop only — no flood, no network amplification
+    MESH_DEBUG_PRINTLN("Boot advert %d/3 sent (zero-hop)", _boot_advert_count);
+    _next_boot_advert = (_boot_advert_count < 3) ? futureMillis(60000) : 0;
+  }
+
+  // Boot node discover: 90s after startup, actively query nearby repeaters
+  // to populate the neighbour table without waiting for their adverts.
+  if (!_boot_discover_sent && _next_boot_discover && millisHasNowPassed(_next_boot_discover)) {
+    _boot_discover_sent = true;
+    _next_boot_discover = 0;
+    sendNodeDiscoverReq();
+    MESH_DEBUG_PRINTLN("Boot node discover sent");
+  }
+
+  // Isolation detection: if no packet received for ISOLATION_SILENCE_HOURS
+  // and uptime is sufficient, send one emergency zero-hop advert.
+  // Thresholds defined at top of file.
+  // Clear cooldown flag when timer expires
+  if (_isolation_advert_cooldown && millisHasNowPassed(_isolation_advert_cooldown)) {
+    _isolation_advert_pending = false;
+    _isolation_advert_cooldown = 0;
+  }
+  if (millisHasNowPassed(_next_isolation_check)) {
+    _next_isolation_check = futureMillis(3600000); // re-check every hour
+    uint32_t pkt_now = radio_driver.getPacketsRecv();
+    if (pkt_now > _isolation_last_pkt_count) {
+      _isolation_silence_count = 0; // traffic seen — not isolated
+    } else {
+      _isolation_silence_count++;
+      MESH_DEBUG_PRINTLN("Isolation check: %d/%d hours of silence",
+                         _isolation_silence_count, ISOLATION_SILENCE_HOURS);
+    }
+    _isolation_last_pkt_count = pkt_now;
+
+    bool uptime_ok = (uptime_millis / 1000 >= ISOLATION_MIN_UPTIME_SECS);
+    if (_isolation_silence_count >= ISOLATION_SILENCE_HOURS &&
+        !_isolation_advert_pending && uptime_ok) {
+      MESH_DEBUG_PRINTLN("Isolation detected: sending emergency zero-hop advert");
+      sendSelfAdvertisement(500, false); // zero-hop only — respects duty cycle budget
+      _isolation_advert_pending = true;
+      _isolation_advert_cooldown = futureMillis(ISOLATION_ADVERT_COOLDOWN_MS);
+      _isolation_silence_count = 0;
+    }
+  }
+
+#if defined(BATT_LOW_THRESHOLD_MV) && defined(BATT_LOW_TX_POWER_DBM)
+  // Battery-adaptive TX power: reduce TX when battery is low to extend runtime.
+  // Only active when board reports a valid voltage (> 1000 mV).
+  // Thresholds set via build flags: BATT_LOW_THRESHOLD_MV and BATT_LOW_TX_POWER_DBM.
+  if (millisHasNowPassed(_next_batt_check)) {
+    _next_batt_check = futureMillis(60000); // re-check every 60s
+    uint16_t batt_mv = board.getBattMilliVolts();
+    if (batt_mv > 1000) {
+      bool is_low = (batt_mv < BATT_LOW_THRESHOLD_MV);
+      if (is_low && !_batt_tx_reduced) {
+        _batt_tx_reduced = true;
+        applyEffectiveTxPower();
+        MESH_DEBUG_PRINTLN("Batt low (%u mV): TX power reduced", batt_mv);
+      } else if (!is_low && _batt_tx_reduced) {
+        _batt_tx_reduced = false;
+        applyEffectiveTxPower();
+        MESH_DEBUG_PRINTLN("Batt recovered (%u mV): TX power restored", batt_mv);
+      }
+    }
+  }
+#endif
+
+  // Radio watchdog: detect and recover from a stuck SX1262 RX state.
+  // Condition: no packets received for 5 consecutive 2-minute windows (10 min total)
+  // AND the STARTRX_TIMEOUT error flag is set.
+  // Recovery: re-apply radio parameters (effectively re-initialises the radio).
+  if (millisHasNowPassed(_next_radio_watchdog)) {
+    _next_radio_watchdog = futureMillis(120000); // check every 2 minutes
+    uint32_t pkt_now = radio_driver.getPacketsRecv();
+    if (pkt_now > _radio_last_pkt_count) {
+      // received at least one packet since last check — radio is healthy
+      _radio_silence_count = 0;
+    } else if (_err_flags & ERR_EVENT_STARTRX_TIMEOUT) {
+      // no new packets AND error flag set — radio may be stuck
+      _radio_silence_count++;
+      MESH_DEBUG_PRINTLN("Radio watchdog: silence=%d/5, STARTRX_TIMEOUT set", _radio_silence_count);
+      if (_radio_silence_count >= 5) {
+        MESH_DEBUG_PRINTLN("Radio watchdog: triggering soft recovery after %d min silence",
+                           (int)(_radio_silence_count * 2));
+        radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+        radio_set_tx_power(_prefs.tx_power_dbm);
+        radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
+        _err_flags &= ~ERR_EVENT_STARTRX_TIMEOUT; // clear the stuck flag
+        _radio_silence_count = 0;
+        MESH_DEBUG_PRINTLN("Radio watchdog: recovery complete");
+      }
+    } else {
+      // no new packets but no error — legitimate quiet period, reset counter
+      _radio_silence_count = 0;
+    }
+    _radio_last_pkt_count = pkt_now;
+  }
+
   // is pending dirty contacts write needed?
   if (dirty_contacts_expiry && millisHasNowPassed(dirty_contacts_expiry)) {
     acl.save(_fs);
     dirty_contacts_expiry = 0;
+  }
+
+  // Temperature-aware TX power.
+  // The nRF52840 MCU temperature sensor gives a proxy for enclosure temp.
+  // Thresholds: TEMP_HIGH_C / TEMP_NORMAL_C / TEMP_TX_REDUCE_DBM (defined at top of file).
+  if (millisHasNowPassed(_next_temp_check)) {
+    _next_temp_check = futureMillis(300000); // re-check every 5 minutes
+    float temp = board.getMCUTemperature();
+    if (!isnan(temp)) {
+      if (temp >= TEMP_HIGH_C && !_temp_tx_reduced) {
+        _temp_tx_reduced = true;
+        applyEffectiveTxPower();
+        MESH_DEBUG_PRINTLN("Temp high (%.1f C): TX reduced by %d dBm", temp, TEMP_TX_REDUCE_DBM);
+      } else if (temp < TEMP_NORMAL_C && _temp_tx_reduced) {
+        _temp_tx_reduced = false;
+        applyEffectiveTxPower();
+        MESH_DEBUG_PRINTLN("Temp normal (%.1f C): TX restored", temp);
+      }
+    }
+  }
+
+  // Automatic Transmit Power Control (TPC) via neighbour SNR average.
+  // Thresholds: TPC_SNR_HIGH / TPC_SNR_LOW / TPC_REDUCE_DBM (defined at top of file).
+#if MAX_NEIGHBOURS
+  if (millisHasNowPassed(_next_tpc_check)) {
+    _next_tpc_check = futureMillis(1800000); // re-evaluate every 30 minutes
+    uint32_t now_ts = getRTCClock()->getCurrentTime();
+    int   active = 0;
+    float snr_sum = 0.0f;
+    for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+      if (neighbours[i].heard_timestamp > 0 &&
+          now_ts >= neighbours[i].heard_timestamp &&
+          now_ts - neighbours[i].heard_timestamp < NEIGHBOUR_EXPIRATION_SECS) {
+        snr_sum += neighbours[i].snr / 4.0f; // stored as x4
+        active++;
+      }
+    }
+    if (active < 2) {
+      // Not enough neighbours for reliable TPC — restore full power to maximise coverage
+      if (_tpc_offset_dbm != 0) {
+        _tpc_offset_dbm = 0;
+        applyEffectiveTxPower();
+        MESH_DEBUG_PRINTLN("TPC: fewer than 2 active neighbours → restoring full TX power");
+      }
+    } else {
+      float avg_snr = snr_sum / active;
+      if (avg_snr >= TPC_SNR_HIGH && _tpc_offset_dbm == 0) {
+        _tpc_offset_dbm = -TPC_REDUCE_DBM;
+        applyEffectiveTxPower();
+        MESH_DEBUG_PRINTLN("TPC: avg SNR=%.1f dB (%d nbrs) → reducing TX by %d dBm",
+                           avg_snr, active, TPC_REDUCE_DBM);
+      } else if (avg_snr < TPC_SNR_LOW && _tpc_offset_dbm != 0) {
+        _tpc_offset_dbm = 0;
+        applyEffectiveTxPower();
+        MESH_DEBUG_PRINTLN("TPC: avg SNR=%.1f dB (%d nbrs) → restoring full TX power",
+                           avg_snr, active);
+      }
+    }
+  }
+#endif
+
+  // Weekly maintenance reboot at WEEKLY_REBOOT_HOUR:WEEKLY_REBOOT_MIN UTC.
+  // Thresholds defined at top of file.
+  if (millisHasNowPassed(_next_reboot_check)) {
+    _next_reboot_check = futureMillis(3600000); // check every hour
+    uint32_t now_ts = getRTCClock()->getCurrentTime();
+    if (now_ts > 1767225600) { // only if RTC is valid (post-2026)
+      DateTime dt = DateTime(now_ts);
+      bool in_reboot_window = (dt.hour() == WEEKLY_REBOOT_HOUR &&
+                               dt.minute() >= WEEKLY_REBOOT_MIN &&
+                               dt.minute() < WEEKLY_REBOOT_MIN + 55);
+      bool uptime_ok = (uptime_millis / 1000 >= WEEKLY_REBOOT_MIN_UPTIME_SECS);
+      if (in_reboot_window && uptime_ok) {
+        MESH_DEBUG_PRINTLN("Weekly maintenance reboot at %02d:%02d UTC (uptime=%llu s)",
+                           dt.hour(), dt.minute(), uptime_millis / 1000);
+        _cli.savePrefs(_fs); // persist preferences
+        acl.save(_fs);       // persist authenticated contacts (bug fix: was missing)
+        board.reboot();
+      }
+    }
+  }
+
+  // Packet rate: compute packets received/sent in the last minute
+  if (millisHasNowPassed(_next_rate_update)) {
+    _next_rate_update = futureMillis(60000);
+    uint32_t recv_now = radio_driver.getPacketsRecv();
+    uint32_t sent_now = radio_driver.getPacketsSent();
+    _pkt_rate_recv    = recv_now - _rate_last_recv;
+    _pkt_rate_sent    = sent_now - _rate_last_sent;
+    _rate_last_recv   = recv_now;
+    _rate_last_sent   = sent_now;
+  }
+
+  // Duty cycle rolling window: snapshot getTotalAirTime() every 5 minutes.
+  // Window spans the last 12 snapshots (= 60 minutes).
+  if (millisHasNowPassed(_next_airtime_snap)) {
+    _next_airtime_snap = futureMillis(300000);
+    _airtime_window[_airtime_window_idx] = getTotalAirTime();
+    _airtime_window_idx = (_airtime_window_idx + 1) % 12;
+    if (_airtime_window_count < 12) _airtime_window_count++;
   }
 
   // update uptime
@@ -1682,4 +2049,73 @@ bool MyMesh::hasPendingWork() const {
   if (bridge.isRunning()) return true;  // bridge needs WiFi radio, can't sleep
 #endif
   return _mgr->getOutboundTotal() > 0;
+}
+
+// Fill display status struct for UITask — called every loop iteration
+void MyMesh::fillDisplayStatus(RepeaterStatus& s) {
+  s.uptime_secs     = (uint32_t)(uptime_millis / 1000);
+  s.pkts_recv       = radio_driver.getPacketsRecv();
+  s.pkts_sent       = radio_driver.getPacketsSent();
+  s.last_snr        = radio_driver.getLastSNR();
+  s.batt_mv         = board.getBattMilliVolts();
+  s.batt_pct        = (s.batt_mv >= 1000) ? voltToBattPct(s.batt_mv) : 255;
+  s.temperature     = board.getMCUTemperature();
+  s.tx_power_cfg    = _prefs.tx_power_dbm;
+  s.tpc_offset_dbm  = _tpc_offset_dbm;
+  s.batt_tx_reduced = _batt_tx_reduced;
+  s.temp_tx_reduced = _temp_tx_reduced;
+  s.flood_accepted  = _flood_advert_accepted;
+  s.flood_rejected  = _flood_advert_rejected;
+  s.isolated        = _isolation_advert_pending;
+
+  // Packet rate (computed every 60s in loop())
+  s.pkt_rate_recv = _pkt_rate_recv;
+  s.pkt_rate_sent = _pkt_rate_sent;
+
+  // Duty cycle: delta airtime over the 60-min rolling window
+  if (_airtime_window_count >= 2) {
+    uint8_t  newest = (_airtime_window_idx + 11) % 12;
+    uint8_t  oldest = (_airtime_window_idx + 12 - _airtime_window_count) % 12;
+    uint32_t air_ms = _airtime_window[newest] - _airtime_window[oldest];
+    uint32_t win_ms = (uint32_t)(_airtime_window_count - 1) * 300000UL;
+    s.duty_cycle_pct = (win_ms > 0) ? ((float)air_ms / win_ms * 100.0f) : 0.0f;
+  } else {
+    s.duty_cycle_pct = 0.0f;
+  }
+
+  // Persistent reboot counter
+  s.reboot_count = _reboot_count;
+
+  // RTC time (valid only after clock sync)
+  uint32_t now_rtc = getRTCClock()->getCurrentTime();
+  s.rtc_valid = (now_rtc > 1767225600UL); // valid after 2026-01-01
+  if (s.rtc_valid) {
+    DateTime dt = DateTime(now_rtc);
+    s.rtc_hour = dt.hour();
+    s.rtc_min  = dt.minute();
+  } else {
+    s.rtc_hour = s.rtc_min = 0;
+  }
+
+  // Compute effective TX power (same logic as the loop adjustments)
+  int8_t eff = _prefs.tx_power_dbm + _tpc_offset_dbm;
+#if defined(BATT_LOW_TX_POWER_DBM)
+  if (_batt_tx_reduced) eff = BATT_LOW_TX_POWER_DBM;
+#endif
+  if (_temp_tx_reduced) eff -= TEMP_TX_REDUCE_DBM;
+  s.tx_power_eff = eff;
+
+  // Count active neighbours
+  uint8_t count = 0;
+#if MAX_NEIGHBOURS
+  uint32_t now_ts = getRTCClock()->getCurrentTime();
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (neighbours[i].heard_timestamp > 0 &&
+        now_ts >= neighbours[i].heard_timestamp &&
+        now_ts - neighbours[i].heard_timestamp < NEIGHBOUR_EXPIRATION_SECS) {
+      count++;
+    }
+  }
+#endif
+  s.neighbour_count = count;
 }

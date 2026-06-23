@@ -35,6 +35,7 @@
 #include <helpers/FirmwareMigration.h>
 #include <helpers/RegionMap.h>
 #include "RateLimiter.h"
+#include "DisplayStatus.h"
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -66,7 +67,9 @@ struct NeighbourInfo {
   mesh::Identity id;
   uint32_t advert_timestamp;
   uint32_t heard_timestamp;
-  int8_t snr; // multiplied by 4, user should divide to get float value
+  int8_t snr;    // most recent SNR (x4)
+  int8_t snr_h1; // previous reading (x4)
+  int8_t snr_h2; // oldest reading (x4)
 };
 
 #ifdef ENABLE_CONSENSUS_TIME_SYNC
@@ -142,8 +145,64 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   unsigned long next_advert_check, next_flood_advert_offset;
   uint8_t adverts_sent;
 
+  // boot advert: 3 zero-hop adverts (60s/120s/180s) to maximise first-contact probability
+  uint8_t _boot_advert_count;
+  unsigned long _next_boot_advert;
+
+  // boot node discover: populate neighbour table quickly after startup
+  bool _boot_discover_sent;
+  unsigned long _next_boot_discover;
+
+  // battery-adaptive TX power
+  bool _batt_tx_reduced;
+  unsigned long _next_batt_check;
+
+  // radio watchdog: soft-recover from stuck RX state
+  uint8_t  _radio_silence_count;
+  uint32_t _radio_last_pkt_count;
+  unsigned long _next_radio_watchdog;
+
+  // temperature-aware TX power
+  bool _temp_tx_reduced;
+  unsigned long _next_temp_check;
+
+  // TPC: automatic TX power control via neighbour SNR average
+  int8_t  _tpc_offset_dbm;
+  unsigned long _next_tpc_check;
+
+  // weekly maintenance reboot
+  unsigned long _next_reboot_check;
+
+  // flood advert filter efficiency counters
+  uint32_t _flood_advert_accepted;
+  uint32_t _flood_advert_rejected;
+
+  // isolation detection: emergency zero-hop advert if silent for too long
+  uint8_t  _isolation_silence_count;
+  uint32_t _isolation_last_pkt_count;
+  bool     _isolation_advert_pending;
+  unsigned long _next_isolation_check;
+  unsigned long _isolation_advert_cooldown;
+
+  // packet rate (updated every 60s)
+  uint32_t _pkt_rate_recv;
+  uint32_t _pkt_rate_sent;
+  uint32_t _rate_last_recv;
+  uint32_t _rate_last_sent;
+  unsigned long _next_rate_update;
+
+  // duty cycle rolling window: 12 snapshots × 5 min = 60-min window
+  uint32_t _airtime_window[12];
+  uint8_t  _airtime_window_idx;
+  uint8_t  _airtime_window_count;
+  unsigned long _next_airtime_snap;
+
+  // persistent reboot counter (loaded from flash in begin())
+  uint32_t _reboot_count;
+
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   void applyTimeConsensus();
+  void applyEffectiveTxPower();  // centralised TX power: batt + TPC + temp combined
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
@@ -249,6 +308,7 @@ public:
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();
+  void fillDisplayStatus(RepeaterStatus& s);
 
 #if defined(WITH_BRIDGE)
   void setBridgeState(bool enable) override {

@@ -5,7 +5,8 @@
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
-  static UITask ui_task(display);
+  static RepeaterStatus rep_status = {};
+  static UITask ui_task(display, &rep_status);
 #endif
 
 StdRNG fast_rng;
@@ -152,6 +153,7 @@ void loop() {
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
+  the_mesh.fillDisplayStatus(rep_status);
   ui_task.loop();
 #endif
   rtc_clock.tick();
